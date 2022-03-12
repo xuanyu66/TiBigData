@@ -21,6 +21,11 @@ import io.tidb.bigdata.test.RandomUtils;
 import io.tidb.bigdata.test.TableUtils;
 import io.tidb.bigdata.tidb.ClientConfig;
 import io.tidb.bigdata.tidb.ClientSession;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
@@ -133,6 +138,22 @@ public class FlinkTest {
       + " 'fields.c1.max'='10',\n"
       + " 'number-of-rows'='10'\n"
       + ")";
+
+  private int queryTableCount(Map<String, String> properties, String databaseName,
+      String tableName) {
+    ClientConfig clientConfig = new ClientConfig(properties);
+    try (Connection connection = DriverManager.getConnection(clientConfig.getDatabaseUrl(),
+        clientConfig.getUsername(), clientConfig.getPassword());
+        Statement statement = connection.createStatement()) {
+      try (ResultSet resultSet = statement.executeQuery(
+          format("SELECT COUNT(*) as c FROM `%s`.`%s`", databaseName, tableName))) {
+        resultSet.next();
+        return resultSet.getInt("c");
+      }
+    } catch (SQLException e) {
+      throw new IllegalStateException(e);
+    }
+  }
 
   public static String getInsertRowSql(String tableName, byte value1, short value2) {
     return format(INSERT_ROW_SQL_FORMAT, CATALOG_NAME, DATABASE_NAME, tableName, value1, value2);
@@ -329,6 +350,7 @@ public class FlinkTest {
     String splitRegionSql = format("SPLIT TABLE `%s` BETWEEN (0) AND (%s) REGIONS %s", tableName,
         rowCount * 8, 100);
     tiDBCatalog.sqlUpdate(splitRegionSql);
+    Assert.assertEquals(rowCount, queryTableCount(properties, DATABASE_NAME, tableName));
   }
 
   @Test
@@ -373,6 +395,7 @@ public class FlinkTest {
         + "SELECT c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15,c16,c17 "
         + "FROM `tidb`.`test`.`%s`", dstTable, srcTable));
     tableEnvironment.execute("test");
+    Assert.assertEquals(rowCount, queryTableCount(properties, DATABASE_NAME, dstTable));
   }
 
   @Test
@@ -423,6 +446,7 @@ public class FlinkTest {
     System.out.println(sql);
     tableEnvironment.sqlUpdate(sql);
     tableEnvironment.execute("test");
+    Assert.assertEquals(rowCount, queryTableCount(properties, DATABASE_NAME, dstTable));
   }
 
 
@@ -470,6 +494,7 @@ public class FlinkTest {
     System.out.println(sql);
     tableEnvironment.sqlUpdate(sql);
     tableEnvironment.execute("test");
+    Assert.assertEquals(rowCount, queryTableCount(properties, DATABASE_NAME, dstTable));
   }
 
   @Test
@@ -513,12 +538,14 @@ public class FlinkTest {
             + "    unique key(c1)\n"
             + ")", DATABASE_NAME, dstTable);
     tiDBCatalog.sqlUpdate(dropTableSql, createTiDBSql);
+    // Test deduplicate
     String sql = format("INSERT INTO `tidb`.`test`.`%s` "
         + "SELECT ABS(c1%%2000),c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15,c16,c17 "
         + "FROM `tidb`.`test`.`%s`", dstTable, srcTable);
     System.out.println(sql);
     tableEnvironment.sqlUpdate(sql);
     tableEnvironment.execute("test");
+    Assert.assertEquals(2000, queryTableCount(properties, DATABASE_NAME, dstTable));
   }
 
   @Test
@@ -566,40 +593,7 @@ public class FlinkTest {
     System.out.println(sql);
     tableEnvironment.sqlUpdate(sql);
     tableEnvironment.execute("test");
-  }
-
-  @Test
-  public void testCheckpoint() throws Exception {
-    EnvironmentSettings settings = EnvironmentSettings.newInstance().inStreamingMode().build();
-    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-    env.enableCheckpointing(10000L);
-    StreamTableEnvironment tableEnvironment = StreamTableEnvironment.create(env, settings);
-    Map<String, String> properties = defaultProperties();
-    properties.put(SINK_IMPL.key(), TIKV.name());
-    properties.put(SINK_TRANSACTION.key(), CHECKPOINT.name());
-    properties.put(ROW_ID_ALLOCATOR_STEP.key(), "12345");
-    properties.put(DEDUPLICATE.key(), "true");
-    properties.put(WRITE_MODE.key(), "upsert");
-    TiDBCatalog tiDBCatalog = new TiDBCatalog(properties);
-    tableEnvironment.registerCatalog("tidb", tiDBCatalog);
-    String createTiDBSql = String.format(
-        "CREATE TABLE IF NOT EXISTS `%s`.`%s`\n"
-            + "(\n"
-            + "    c1  bigint unique key,\n"
-            + "    c2  bigint\n"
-            + ")", DATABASE_NAME, "test_write");
-    tiDBCatalog.sqlUpdate("DROP TABLE IF EXISTS test_write");
-    tiDBCatalog.sqlUpdate(createTiDBSql);
-    CatalogBaseTable table = tiDBCatalog.getTable("test", "test_write");
-    String createDatagenSql = format("CREATE TABLE datagen \n%s\n WITH (\n"
-        + " 'connector' = 'datagen',\n"
-        + " 'rows-per-second' = '1000'"
-        + ")", table.getUnresolvedSchema().toString());
-    tableEnvironment.executeSql(createDatagenSql);
-
-    tableEnvironment.sqlUpdate(
-        "INSERT INTO `tidb`.`test`.`test_write` SELECT c1,c2 FROM datagen");
-    tableEnvironment.execute("test");
+    Assert.assertEquals(rowCount, queryTableCount(properties, DATABASE_NAME, dstTable));
   }
 
   @Test
